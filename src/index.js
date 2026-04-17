@@ -1,15 +1,11 @@
-import { start } from './whatsapp.js';
 import { createServer } from './server.js';
+import { sessionManager } from './session-manager.js';
 
 const PORT = process.env.PORT || 3000;
 
-// Establish the WhatsApp connection
-start().catch((err) => {
-  console.error('WhatsApp başlatma hatası:', err);
-  process.exit(1);
-});
+await sessionManager.restoreAll();
 
 // Start HTTP server
 createServer().listen(PORT, () => {
-  console.log(`🚀 API on http://localhost:${PORT}`);
+  console.log(`API on http://localhost:${PORT}`);
 });
