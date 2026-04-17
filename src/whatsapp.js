@@ -3,21 +3,26 @@ import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 
-async function  start() {
+let sock = null;
+let currentQR = null;
+let connectionState = 'disconnected'; // 'connecting' | 'qr' | 'connected' | 'disconnected'
+
+export async function start() {
     // Save seesion info in ./auth_info
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
 
-    // Get the Whatsapp Web versiion
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`WA Web Version: ${version.join('.')}, is it up to date?`);
+    // Get the Whatsapp Web version
+    const { version } = await fetchLatestBaileysVersion();
 
     // Create websocket
-    const sock = makeWASocket({
+    sock = makeWASocket({
         version,
         auth: state,
         logger: pino({ level: 'silent' }), 
         markOnlineOnConnect: false // Keep receiving notifications on your phone
     });
+
+    connectionState = 'connecting';
 
     // Write the disk if credentials change
     sock.ev.on('creds.update', saveCreds);
@@ -27,15 +32,19 @@ async function  start() {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            console.log("\nScan the QR code with your phone:\n");
-            qrcode.generate(qr, { small: true });
+            currentQR = qr;
+            connectionState = 'qr';
+            console.log("\nQR ready, Give GET /qr \n");
         }
 
         if (connection === 'open') {
+            currentQR = null;
+            connectionState = 'connected';
             console.log("Connected");
         }
 
         if (connection === 'close') {
+            connectionState = 'disconnected'
             const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             console.log(`Connection lost. Try Again: ${shouldReconnect}`);
@@ -48,14 +57,42 @@ async function  start() {
     if (type !== 'notify') return;
     for (const msg of messages) {
       if (msg.key.fromMe) continue; // Skip own messages
-      const from = msg.key.remoteJid;
       const text =
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
-        '[metin değil]';
-      console.log(`📩 ${from}: ${text}`);
+        '[not text]';
+      console.log(`📩 ${msg.key.remoteJid}: ${text}`);
     }
   });
 }
 
-start();
+export function getStatus() {
+    return {
+        state: connectionState,
+        hasQR: Boolean(currentQR),
+    };
+}
+
+export function getQR() {
+    return currentQR;
+}
+
+/**
+ * Convert the phone number to WhatsApp JID format
+ * "905551112233" → "905551112233@s.whatsapp.net"
+ */
+
+function toJid(to) {
+    if(to.includes('@')) return to;
+    const clean = to.replace(/[^\d]/g, '');
+    return `${clean}@s.whatsapp.net`;
+}
+
+export async function sendText(to, text) {
+  if (connectionState !== 'connected') {
+    throw new Error(`Connection is not open (state: ${connectionState})`);
+  }
+  const jid = toJid(to);
+  const result = await sock.sendMessage(jid, { text });
+  return { id: result.key.id, to: jid };
+}
