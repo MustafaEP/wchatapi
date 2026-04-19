@@ -1,4 +1,10 @@
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from 'baileys';
+import {
+  makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  downloadMediaMessage,
+} from 'baileys';
 import { Boom } from '@hapi/boom';
 import { dispatch } from './webhook-dispatcher.js';
 import pino from 'pino';
@@ -13,6 +19,8 @@ export class Session {
         this.qr = null;
         this.state = 'disconnected';
         this.webhookUrl = options.webhookUrl ?? null;
+        this.mediaMessages = new Map();
+        this.MEDIA_CACHE_LIMIT = 500;
     }
     setWebhook(url) {
         this.webhookUrl = url || null;
@@ -87,11 +95,17 @@ export class Session {
             if (type !== 'notify') return;
             for (const msg of messages) {
                 if (msg.key.fromMe) continue;
+                
                 const text =
                     msg.message?.conversation ||
                     msg.message?.extendedTextMessage?.text ||
-                    '[not text]';
-                
+                    null;
+
+                const mediaInfo = this._extractMediaInfo(msg);
+                if (mediaInfo) {
+                    this._cacheMediaMessage(msg.key.id, msg);
+                }
+
                 const payload = {
                     id: msg.key.id,
                     from: msg.key.remoteJid,
@@ -99,12 +113,14 @@ export class Session {
                     timestamp: msg.messageTimestamp,
                     pushName: msg.pushName ?? null,
                     text,
-                    raw: msg.message,
+                    media: mediaInfo,
                 };
+
                 console.log(`[${this.id}] - ${msg.key.remoteJid}: ${text}`);
                 this._emit('message', payload);
             }
         });
+        
         this.sock.ev.on('messages.update', (updates) => {
             for (const u of updates) {
                 if (typeof u.update?.status === 'undefined') continue;
@@ -162,5 +178,97 @@ export class Session {
         if (to.includes('@')) return to;
         const clean = to.replace(/[^\d]/g, '');
         return `${clean}@s.whatsapp.net`;
+    }
+
+    _extractMediaInfo(msg) {
+        const m = msg.message;
+        if (!m) return null;
+
+        const inner = m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m;
+
+        const types = [
+            ['imageMessage', 'image'],
+            ['videoMessage', 'video'],
+            ['audioMessage', 'audio'],
+            ['documentMessage', 'document'],
+            ['stickerMessage', 'sticker'],
+        ];
+
+        for (const [key, type] of types) {
+            if (inner[key]) {
+                const node = inner[key];
+                return {
+                    type,
+                    mimetype: node.mimetype ?? null,
+                    size: Number(node.fileLength) || null,
+                    caption: node.caption ?? null,
+                    filename: node.fileName ?? null,
+                    downloadUrl: `/sessions/${this.id}/media/${msg.key.id}`,
+                };
+            }
+        }
+        return null;
+    }
+
+    _cacheMediaMessage(id, msg) {
+        if (this.mediaMessages.size >= this.MEDIA_CACHE_LIMIT) {
+            const firstKey = this.mediaMessages.keys().next().value;
+            this.mediaMessages.delete(firstKey);
+        }
+            this.mediaMessages.set(id, msg);
+    }
+
+    async downloadMedia(messageId) {
+        const msg = this.mediaMessages.get(messageId);
+        if (!msg) {
+            const err = new Error('Medya bulunamadı veya süresi doldu');
+            err.status = 404;
+            throw err;
+        }
+        const buffer = await downloadMediaMessage(msg, 'buffer', {});
+        const mediaInfo = this._extractMediaInfo(msg);
+        return { buffer, mediaInfo };
+    }
+
+    /**
+     * Send media.
+     * @param {string} to - no or JID
+     * @param {object} opts
+     * @param {'image'|'video'|'audio'|'document'} opts.type
+     * @param {Buffer|string} opts.source - Buffer or URL string
+     * @param {string} [opts.caption] - image/video/document for subtitle
+     * @param {string} [opts.filename] - name for document
+     * @param {string} [opts.mimetype] - MIME for document/audio 
+     * @param {boolean} [opts.ptt] -  "voice note" mod for audio
+     */
+    async sendMedia(to, opts) {
+        if (this.state !== 'connected') {
+            throw new Error(`Session isn't open (status: ${this.state})`);
+        }
+        const { type, source, caption, filename, mimetype, ptt } = opts;
+        if (!['image', 'video', 'audio', 'document'].includes(type)) {
+            throw new Error(`Invalid media type: ${type}`);
+        }
+        if (!source) throw new Error('Source required (Buffer or URL)');
+
+        const jid = this._toJid(to);
+
+        const media = Buffer.isBuffer(source) ? source : { url: source };
+
+        const content = { [type]: media };
+        if (caption && (type === 'image' || type === 'video' || type === 'document')) {
+            content.caption = caption;
+        }
+        if (type === 'document') {
+            content.fileName = filename || 'file';
+        if (mimetype) content.mimetype = mimetype;
+        }
+        if (type === 'audio') {
+            content.mimetype = mimetype || 'audio/ogg; codecs=opus';
+            content.ptt = Boolean(ptt);
+        }
+
+        const result = await this.sock.sendMessage(jid, content);
+        return { id: result.key.id, to: jid };
     }
 }
