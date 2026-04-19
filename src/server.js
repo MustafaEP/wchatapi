@@ -10,13 +10,26 @@ export function createServer() {
         res.json(sessionManager.list());
     });
 
-    // Create a new session or start an existing one
+    // Create a new session (Opsional)
     app.post('/sessions/:id/start', async (req, res) => {
         try {
-            const session = await sessionManager.create(req.params.id);
+            const { webhookUrl } = req.body ?? {};
+            const session = await sessionManager.create(req.params.id, { webhookUrl });
             res.json(session.getStatus());
         } catch (err) {
             res.status(err.status || 400).json({ error: err.message });
+        }
+    });
+
+    // Update webhook url
+    app.put('/sessions/:id/webhook', (req, res) => {
+        try {
+            const { url } = req.body ?? {};
+            const session = sessionManager.get(req.params.id);
+            session.setWebhook(url ?? null);
+            res.json({ ok: true, webhookUrl: session.webhookUrl });
+        } catch (err) {
+            res.status(err.status || 500).json({ error: err.message });
         }
     });
 
