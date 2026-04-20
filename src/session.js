@@ -20,6 +20,8 @@ export class Session {
         this.state = 'disconnected';
         this.webhookUrl = options.webhookUrl ?? null;
         this.mediaMessages = new Map();
+        this.history = [];
+        this.HISTORY_LIMIT = 200;
         this.MEDIA_CACHE_LIMIT = 500;
     }
     setWebhook(url) {
@@ -117,6 +119,18 @@ export class Session {
                 };
 
                 console.log(`[${this.id}] - ${msg.key.remoteJid}: ${text}`);
+                
+                this._pushHistory({
+                    kind: 'in',
+                    id: payload.id,
+                    from: payload.from,
+                    fromMe: false,
+                    timestamp: Number(payload.timestamp) * 1000, // unix s → ms
+                    pushName: payload.pushName,
+                    text: payload.text,
+                    media: payload.media,
+                });
+                
                 this._emit('message', payload);
             }
         });
@@ -158,6 +172,7 @@ export class Session {
             id: this.id,
             state: this.state,
             hasQR: Boolean(this.qr),
+            webhookUrl: this.webhookUrl,
         };
     }
 
@@ -171,6 +186,16 @@ export class Session {
         }
         const jid = this._toJid(to);
         const result = await this.sock.sendMessage(jid, { text });
+
+        this._pushHistory({
+            kind: 'out',
+            id: result.key.id,
+            to: jid,
+            fromMe: true,
+            timestamp: Date.now(),
+            text,
+            media: null,
+        });
         return { id: result.key.id, to: jid };
     }
 
@@ -216,6 +241,18 @@ export class Session {
             this.mediaMessages.delete(firstKey);
         }
             this.mediaMessages.set(id, msg);
+    }
+
+    _pushHistory(entry) {
+        this.history.push(entry);
+        if(this.history.length > this.HISTORY_LIMIT) {
+            this.history.splice(0, this.history.length - this.HISTORY_LIMIT);
+        }
+    }
+
+    getHistory(limit = 50) {
+        const n = Math.min(Math.max(parseInt(limit, 10) || 50, 1), this.HISTORY_LIMIT);
+        return this.history.slice(-n);
     }
 
     async downloadMedia(messageId) {
@@ -269,6 +306,22 @@ export class Session {
         }
 
         const result = await this.sock.sendMessage(jid, content);
+
+        this._pushHistory({
+            kind: 'out',
+            id: result.key.id,
+            to: jid,
+            fromMe: true,
+            timestamp: Date.now(),
+            text: caption ?? null,
+            media: {
+                type,
+                mimetype: mimetype ?? null,
+                caption: caption ?? null,
+                filename: filename ?? null,
+            },
+        });
+
         return { id: result.key.id, to: jid };
     }
 }

@@ -1,0 +1,13 @@
+services:
+  waha-mini:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - API_KEY=${API_KEY}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - SEND_DELAY_MS=1500
+    volumes:
+      - ./auth_info:/app/auth_info
+    restart: unless-stopped
